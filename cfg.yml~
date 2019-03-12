@@ -1,0 +1,45 @@
+file_io:
+    dirs:
+        studyDir: /biotic/home/marym/data/thesis
+        subjectsDir: /biotic/home/marym/data/thesis/subjects
+        simDir: /biotic/home/marym/data/thesis/sim_data/sim_data
+        relDir: /biotic/home/marym/data/thesis/reliability-maps
+    file_ext:
+        src_fif: -vol-5-src.fif
+        mri_fif: COR-coreg.fif
+        bem_fif: -5120-bem-sol.fif
+        forward_fif: _raw_tsss-cleaned-fwd.fif
+        nifti_file: _raw_tsss-cleaned-epo-ave_LCMV.nii
+        nn_file: _NN.csv
+        sim_epoch_fif: SEF_simDipole-epo.fif
+reliability_mapping:
+    data_division:
+        num_replications: 5
+        chronological: False
+    nn:
+        neighbourhood: 2
+        radius: 0.005 # only used if neighbourhood = False
+    likelihood:
+        init_beta: 0.3
+        max_iterations: 400
+        conv_tolerance: 0.001
+    files:
+        MASK: None
+data_processing:
+    baseline:
+        baseStart: -0.02
+        baseEnd: 0.
+    LCMV:
+        bfBaselineMin: -0.5 # this is different
+        bfBaselineMax: 0.0
+        bfActiveMin: 0.0
+        bfActiveMax: 0.1
+        regularization: 0.01
+studySettings:
+    subjects:
+        - sub01
+        - sub02
+        - sub03
+    sim_modes:
+        - one_fixed
+#        - one_jitter 

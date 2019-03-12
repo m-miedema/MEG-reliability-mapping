@@ -1,0 +1,125 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 21 22:43:43 2019
+
+@author: Mary Miedema
+"""
+
+import os
+import mne
+import numpy as np
+import random
+import logging.config
+import warnings
+
+import map_reliability_support.support_functions as sf
+
+logger = logging.getLogger(__name__)
+mne.set_log_level("WARNING")
+
+warnings.simplefilter("ignore", category=DeprecationWarning)
+warnings.simplefilter("ignore", category=RuntimeWarning)
+
+def set_up(cfg):
+    '''Calculate NNs, generate replications
+    '''
+    
+    # extract relevant paths   
+    subjectsDir = cfg["file_io"]["dirs"]["subjectsDir"]
+    simDir = cfg["file_io"]["dirs"]["simDir"]
+    relDir = cfg["file_io"]["dirs"]["relDir"] 
+    os.environ["SUBJECTS_DIR"] = subjectsDir
+       
+    # extract settings for finding nearest neighbours
+    nbrhd = cfg["reliability_mapping"]["nn"]["neighbourhood"]
+    rad = cfg["reliability_mapping"]["nn"]["radius"] 
+    
+    # extract settings for data division into replications
+    num_rep = cfg["reliability_mapping"]["data_division"]["num_replications"]
+    chron = cfg["reliability_mapping"]["data_division"]["chronological"]
+    
+    # extract settings for data processing & beamformer
+    baseStart = cfg["data_processing"]["baseline"]["baseStart"]
+    baseEnd = cfg["data_processing"]["baseline"]["baseEnd"]
+    bfBaselineMin = cfg["data_processing"]["LCMV"]["bfBaselineMin"]
+    bfBaselineMax = cfg["data_processing"]["LCMV"]["bfBaselineMax"]
+    bfActiveMin = cfg["data_processing"]["LCMV"]["bfActiveMin"]
+    bfActiveMax = cfg["data_processing"]["LCMV"]["bfActiveMax"]
+    regularization = cfg["data_processing"]["LCMV"]["regularization"]
+    
+    for subject_id in cfg["studySettings"]["subjects"]:   
+        # subject-specific data:
+        subjectDir = os.path.join(subjectsDir, subject_id)
+        mriFile = os.path.join(subjectDir, 'mri', 'T1-neuromag', 'sets', cfg["file_io"]["file_ext"]["mri_fif"])
+        bemFile = os.path.join(subjectDir, 'bem', "".join([subject_id, cfg["file_io"]["file_ext"]["bem_fif"]]))
+        srcFile = os.path.join(subjectDir, 'bem', "".join([subject_id, cfg["file_io"]["file_ext"]["src_fif"]]))
+        # nearest neighbours csv file to write to
+        nnFile = os.path.join(subjectDir, 'bem', "".join([subject_id, cfg["file_io"]["file_ext"]["nn_file"]]))
+        # find nearest neighbours for each point in src space and write to file
+        sf.get_nn_src(srcFile, nnFile, nbrhd, rad)
+        
+        for sim_mode in cfg["studySettings"]["sim_modes"]:
+            # split epochs file into a number of epochs files (ie. replications) & save an ERB map for each
+            
+            epochFile = os.path.join(simDir, 'sim_data', subject_id, sim_mode,
+                                     cfg["file_io"]["file_ext"]["sim_epoch_fif"])
+            
+            repDir = os.path.join(relDir, subject_id, sim_mode)
+            if not os.path.exists(repDir):
+                logger.debug("Path does not exist.  Making {}".format(repDir))
+                os.makedirs(repDir)
+                            
+            # read in & divide epochs    
+            logger.info("Reading epoch data ...")
+            epochs = mne.read_epochs(epochFile)
+            if epochs.info['sfreq'] == 1000.:
+                pass
+            else:
+                logger.debug('Resampling epochs to 1000 Hz')
+                epochs.resample(1000., npad=0)   
+            idxs = np.arange(len(epochs))
+            if chron == False:
+                random.shuffle(idxs)    
+            splits = np.array_split(idxs, num_rep)
+            # note: number of epochs in each replication may differ by 1
+            
+            # get forward solution
+            fwdFile = os.path.join(simDir, 'python_data', subject_id, 
+                                   "".join(['SEF_good', cfg["file_io"]["file_ext"]["forward_fif"]]))
+              
+            if os.path.exists(fwdFile):
+                pass
+            else:
+                logger.debug("Forward solution does not exist.  Making forward solution.")
+                src = mne.read_source_spaces(srcFile)
+                forward = mne.make_forward_solution(epochs.info, trans=mriFile, 
+                                    src=src, bem=bemFile, meg=True, eeg=False)
+                mne.write_forward_solution(fwdFile, forward, overwrite=True)
+            forward = mne.read_forward_solution(fwdFile)
+            
+            split_num = 1
+            # create ERB map for each replication
+            for split in splits:
+                evoked = epochs[split].average()
+                evoked.apply_baseline((baseStart, baseEnd))
+                # calculate covariance
+                noise_cov = mne.compute_covariance(epochs[split], 
+                                tmin=bfBaselineMin, tmax=bfBaselineMax, n_jobs = 4)
+                data_cov = mne.compute_covariance(epochs[split], 
+                                tmin=bfActiveMin, tmax=bfActiveMax, n_jobs = 4)
+                # run LCMV beamformer
+                filters = mne.beamformer.make_lcmv(epochs.info, forward, data_cov, 
+                            reg=regularization, noise_cov=noise_cov, pick_ori='max-power')
+                stc = mne.beamformer.apply_lcmv(evoked, filters)
+                # crop beamformer result to times of interest
+                stc.crop(bfActiveMin, bfActiveMax)
+                # take absolute value of beamformer (to eliminate anti-phase issue)
+                np.abs(stc.data, out=stc.data)
+                
+                # save ERB maps
+                niiFile = os.path.join(repDir, "".join(['replication_', 
+                                str(split_num), '_', cfg["file_io"]["file_ext"]["nifti_file"]]))
+                mne.save_stc_as_volume(niiFile, stc, forward['src'], dest='surf',
+                                                             mri_resolution=False)
+                
+                split_num = split_num + 1              

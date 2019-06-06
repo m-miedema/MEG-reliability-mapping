@@ -1,0 +1,38 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Feb 26 14:11:11 2019
+
+@author: Mary Miedema
+"""
+import time
+import likelihood
+import logging.config
+
+logger = logging.getLogger(__name__)
+
+# to do: integrate better with top-level run script
+
+def initialize(cfg):
+
+    for subject_id in cfg["studySettings"]["subjects"]: 
+        logger.info("Beginning reliability analysis for {}".format(subject_id))
+        
+        for sim_mode in cfg["studySettings"]["sim_modes"]:
+            logger.info("Beginning reliability analysis for {}".format(sim_mode))
+    
+            for t in cfg["reliability_mapping"]["map_times"]:
+                start = time.time()
+                
+                # initialize likelihood object
+                ML_rel = likelihood.ML_reliability(cfg, subject_id, sim_mode, t)
+                
+                # maximize likelihood with ICM approach
+                ML_rel.calc_reliability_measures()
+                
+                # create relevant reliability maps
+                for map_thresh in cfg["reliability_mapping"]["map_thresholds"]:
+                    ML_rel.map_reliability(map_thresh)
+                    
+                end = time.time()
+                
+                print(end-start)

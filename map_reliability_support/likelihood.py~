@@ -1,0 +1,318 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 15 03:54:41 2019
+
+@author: Mary Miedema
+"""
+
+import os
+import mne
+import time
+import copy
+import nibabel as nib
+import numpy as np
+import scipy as scp
+from scipy.optimize import minimize
+from scipy.integrate import quad
+import pandas as pd
+import logging.config
+
+logger = logging.getLogger(__name__)
+
+
+class ML_reliability:
+    def __init__(self, cfg, subject_id, sim_mode, timept):
+        # note: timepoint needs to be chosen as appropriate index -- integrate better with previous ERB crop
+        
+        self.cfg = cfg
+        self.subject_id = subject_id
+        self.sim_mode = sim_mode
+        self.timept = timept
+        
+        # unpack settings from configuration file
+        self.num_replic = cfg["reliability_mapping"]["data_division"]["num_replications"]
+        self.num_thresh = cfg["reliability_mapping"]["ML"]["num_thresholds"]
+        self.beta0 = cfg["reliability_mapping"]["ML"]["init_beta"]
+        self.max_iter = cfg["reliability_mapping"]["ML"]["max_iterations"]
+        self.tolerance = cfg["reliability_mapping"]["ML"]["conv_tolerance"]
+        
+        self.relDir = cfg["file_io"]["dirs"]["relDir"]
+        self.replicDir = os.path.join(self.relDir, subject_id, sim_mode)
+        self.erbFile = os.path.join(self.replicDir,"".join(['full', cfg["file_io"]["file_ext"]["nifti_file"]]))         
+        self.nnDir = os.path.join(cfg["file_io"]["dirs"]["subjectsDir"], subject_id, 'bem')
+        self.nnFile = os.path.join(self.nnDir, "".join([subject_id, cfg["file_io"]["file_ext"]["nn_file"]]))
+        self.nn_df = pd.read_csv(self.nnFile) 
+        
+        # choose export naming conventions later
+        #self.outputDir = 
+        #self.outputFif =
+        
+        # initialize other variables
+        self.erb = None 
+        self.erb_trans = None
+        self.vox_in_use = None
+        self.thresh = None
+        self.y = None
+        
+        self.lambda0 = None
+        self.p_a0 = None
+        self.p_i0 = None
+        
+        self.lambd = None
+        self.p_a = None
+        self.p_i = None
+        self.beta = self.beta0
+        
+        self.lambda_conv = None
+        self.p_conv = None
+        self.beta_conv = None
+        self.conv = 1000.
+
+        self.p_eval = 0
+        self.beta_eval = 0
+        self.lambda_eval = 0
+        
+        self.rel_thresh = None # needs to be a value in self.thresh
+        self.active_voxels = None
+        self.reliability = None
+        self.anti_reliability = None
+        self.reliability_map = None
+        
+        # find thresholds
+        self.get_thresholds()
+        
+        # find number of replications each voxel is classified as active in for each threshold
+        self.calc_y()
+        
+        # calculate an initial guess for lambda
+        self.guess_lambda()
+        
+        # calculate an initial guess for the p_a and p_i for each threshold
+        self.guess_p()
+        
+        
+    def get_thresholds(self):
+        # read in ERB file
+        erb_obj = nib.load(self.erbFile)
+        # get data at relevant timepoint
+        self.erb = erb_obj.get_fdata()[:,:,:,self.timept]
+        self.erb_trans = erb_obj.affine
+        # find maximum value
+        erb_max = np.amax(self.erb)
+        # get voxels in use
+        self.vox_in_use = (np.abs(self.erb.flatten()) > 0)
+        # create equally spaced thresholds ranging from 0-90% of max
+        thresholds = np.linspace(0.,0.9*erb_max,num=self.num_thresh)
+        self.thresh = thresholds
+        
+    def calc_y(self):
+        y_data = []
+        # first read in the replications
+        for split_num in range(1,self.num_replic+1):
+            # load ERB data for each 'replication' at specified timepoint
+            replicFile = os.path.join(self.replicDir, "".join(['replication_', 
+                                str(split_num), '_', self.cfg["file_io"]["file_ext"]["nifti_file"]]))
+            replic_obj = nib.load(replicFile)
+            replic_data = replic_obj.get_fdata()[:,:,:,self.timept]
+            # flatten ERB data and check whether active for each threshold
+            y_obj = 1.* (np.broadcast_to(replic_data.flatten(), 
+                        (self.num_thresh,replic_data.size)) > self.thresh[:, np.newaxis])
+            y_data.append(y_obj)
+        # sum across replications    
+        self.y = sum(y_data)
+        
+        
+    def guess_lambda(self):
+        # initial guess for probability a voxel is truly active: ratio to maximum activity
+        self.lambda0 = (self.erb.flatten())/np.amax(self.erb)
+        self.lambd = copy.deepcopy(self.lambda0) 
+        
+        
+    def guess_p(self):
+        # not quite sure if there is a simple data-driven way to do this
+        # referring to Genovese et al. Table 3 as a rough guide for now:
+        p = np.linspace(0.9,0.1,self.num_thresh)
+        self.p_a0 = p
+        self.p_i0 = np.exp(-1/p) 
+        self.p_a = copy.deepcopy(self.p_a0) 
+        self.p_i = copy.deepcopy(self.p_i0)        
+        
+        
+    def estimate_p(self):
+        # first load previous guesses for p_a & p_i into single array
+        p_guess = np.concatenate((self.p_a,self.p_i),axis=0)
+        p_bounds = scp.optimize.Bounds(np.zeros(p_guess.shape),np.ones(p_guess.shape))
+        #p_opt_res = scp.optimize.minimize(self.p_func,p_guess,method='',bounds=p_bounds)
+        p_opt_res = minimize(self.p_func,p_guess,method='TNC',callback=self.callback_p,bounds=p_bounds)
+        p_est = p_opt_res.x
+        
+        print(p_opt_res.success)
+        print(p_opt_res.nit)
+        print(p_est)
+        
+        # update guesses for p_a & p_i
+        self.p_a, self.p_i = np.split(p_est,2)
+        # calculate difference from previous guesses
+        self.p_conv = np.abs(p_est - p_guess)
+
+    def estimate_lambda(self):
+        # ICM estimation process for lambda:
+        lambda_prev = copy.deepcopy(self.lambd)
+        #lambda_bounds = scp.optimize.Bounds(np.zeros(1),np.ones(1))
+        for vox in range(0,self.lambd.size):
+            # only perform estimation if voxel in use:
+            if self.vox_in_use[vox] == True:
+                # now maximize local likelihood
+                lambda_guess = self.lambd[vox]
+                vox_opt_res = minimize(self.lambda_func,lambda_guess,
+                                                    args=vox,method='TNC',bounds=[(0.,1.)])
+                self.lambd[vox] = vox_opt_res.x
+            print "estimation complete for voxel", vox, "out of", self.lambd.size
+        self.lambda_conv = np.abs(self.lambd - lambda_prev) 
+        
+    def estimate_beta(self):
+        beta_guess = self.beta
+        beta_opt_res = minimize(self.beta_func,beta_guess,method='Nelder-Mead',tol=0.0001,callback=self.callback_beta)
+        beta_est = beta_opt_res.x
+        
+        print(beta_opt_res.success)
+        print(beta_opt_res.nit)
+        print(beta_est)
+        
+        # calculate difference from previous guesses
+        self.beta_conv = np.abs(beta_est - beta_guess)
+        # update guess for beta
+        self.beta = beta_est
+
+    def calc_convergence(self):
+        return max([max(self.p_conv), max(self.lambda_conv), self.beta_conv])
+        
+    def calc_reliability_measures(self):
+        num_iter = 1
+        conv = self.conv
+        while conv > self.tolerance and num_iter < self.max_iter:
+            print(time.time())
+            self.estimate_p()
+            print('SUCCESS!')
+            print(time.time())
+            self.estimate_beta()
+            self.estimate_lambda()
+            logger.info("ICM estimation in progress; iteration {}".format(num_iter))
+            conv = self.calc_convergence()
+            num_iter += 1
+	print "Finished calculation with ",num_iter," iterations"
+        logger.info("Reliability measure estimation completed; convergence within {}".format(conv))
+        
+    def map_reliability(self,t):
+        # in the future, could have an option to output reliability map for each threshold instead
+        # for now choose the first threshold equal to or higher than t
+        t_thresh = np.argmax(self.thresh>=t)
+        self.rel_thresh = self.thresh[t_thresh]
+        logger.info("Reliability map generated for threshold set to {} of maximum activity".format(self.rel_thresh))
+        # to do: add error message here if t not within appropriate range
+        
+        # find all active voxels in original ERB map        
+        self.active_voxels = np.where(self.erb.flatten() >= self.rel_thresh, True, False)
+        # find remaining inactive voxels
+        self.inactive_voxels = np.where(0. < self.erb.flatten(), True, False)*np.where(self.erb.flatten() < self.rel_thresh, True, False)
+        
+        # calculate unconditional probabilities pi
+        pi_a = 1
+        pi_i = 1
+        for k in range(0,t_thresh+1):
+            pi_a *= self.p_a[k]
+            pi_i *= self.p_i[k]
+
+        # calculate reliability for active voxels
+        rel = np.divide(pi_a*self.lambd,(pi_a*self.lambd + pi_i*(1.-self.lambd)))
+        self.reliability = np.multiply(self.active_voxels, rel)
+        # calculate antireliability for inactive voxels
+        antirel = np.divide(((1.-pi_i)*(1.-self.lambd)),((1.-pi_a)*self.lambd + (1.-pi_i)*(1.-self.lambd)))
+        self.anti_reliability = np.multiply(self.inactive_voxels, antirel)
+        # combine reliability & NEGATIVE anti-reliability
+        self.reliability_map = self.reliability - self.anti_reliability
+        
+        # use nibabel to save as nifti -- get header from ERB for appr. transform?
+        ni_map = nib.Nifti1Image(self.reliability_map,self.erb_trans)
+        niFile = str(t*100)+'_test.nii'
+        nib.save(ni_map,niFile)
+
+    def vox_nn(self,vox):
+        # returns indices of nearest neighbours of vox  
+        this_nn_df = self.nn_df.copy()
+        vox_nn_df = this_nn_df[this_nn_df['src_index']==vox]
+        return vox_nn_df['NN'].tolist()        
+
+######################### callback functions ##################################
+
+    def callback_p(self,p_guess):
+        self.p_eval += 1
+        print(self.p_eval)
+        print(p_guess)
+        print(self.p_func(p_guess))
+        print(time.time())
+
+    def callback_beta(self,beta_guess):
+        self.beta_eval += 1
+        print(self.beta_eval)
+        print(beta_guess)
+        
+######################### likelihood functions ################################
+        
+    def p_func(self,p):
+        p_a, p_i = np.split(p,2)
+        log_l = 0.
+        for vox in range(0,self.lambd.size):
+            if self.vox_in_use[vox] == True:
+                lfunc1 = self.lambd[vox]
+                lfunc2 = 1. - self.lambd[vox]
+                for thresh_k in range(1, self.thresh.size):
+                    lfunc1 *= scp.special.comb(self.y[thresh_k-1,vox],
+                                self.y[thresh_k,vox])*(p_a[thresh_k]**self.y[thresh_k,vox])*((1.-p_a[thresh_k])**(self.y[thresh_k-1,vox]-self.y[thresh_k,vox]))
+                    lfunc2 *= scp.special.comb(self.y[thresh_k-1,vox],
+                                self.y[thresh_k,vox])*(p_i[thresh_k]**self.y[thresh_k,vox])*((1.-p_i[thresh_k])**(self.y[thresh_k-1,vox]-self.y[thresh_k,vox]))
+                #print(lfunc1)
+                #print(lfunc2)
+                #print(np.log(lfunc1 + lfunc2))
+                log_l += np.log(lfunc1 + lfunc2)
+        return -log_l
+    
+    
+    def beta_func(self,beta):
+        lfunc1 = 0.
+        lfunc2 = 0.
+        for vox in range(0,self.lambd.size):
+            if self.vox_in_use[vox] == True:
+                nn_v = self.vox_nn(vox)
+                for n_vox in nn_v:
+                    lfunc1 += 1./(1+(self.lambd[vox]-self.lambd[n_vox])**2.)
+                integral, err = quad(self.beta_integrand, 0., 1., args = (nn_v, beta))
+                lfunc2 += np.log(integral)
+        lfunc1 *= beta                    
+        log_pseud_l = lfunc1 - lfunc2
+        return -log_pseud_l
+    
+    def beta_integrand(self, lambda_i, nn_v, beta):
+        lambda_sum = 0
+        for n_vox in nn_v:
+            lambda_sum += 1./(1+(lambda_i - self.lambd[n_vox])**2.)
+        return np.exp(beta*lambda_sum)
+    
+    def lambda_func(self,lambd_vox,vox):
+        log_l = 0.
+        if self.vox_in_use[vox] == True:
+            lfunc1 = lambd_vox
+            lfunc2 = 1. - lambd_vox
+            for thresh_k in range(1, self.thresh.size):
+                lfunc1 *= scp.special.comb(self.y[thresh_k-1,vox],
+                            self.y[thresh_k,vox])*(self.p_a[thresh_k]**self.y[thresh_k,vox])*((1.-self.p_a[thresh_k])**(self.y[thresh_k-1,vox]-self.y[thresh_k,vox]))
+                lfunc2 *= scp.special.comb(self.y[thresh_k-1,vox],
+                            self.y[thresh_k,vox])*(self.p_i[thresh_k]**self.y[thresh_k,vox])*((1.-self.p_i[thresh_k])**(self.y[thresh_k-1,vox]-self.y[thresh_k,vox]))
+            log_l += np.log(lfunc1 + lfunc2)
+            # penalty term:
+            betafunc = 0.
+            nn_v = self.vox_nn(vox)
+            for n_vox in nn_v:
+                betafunc += 1./(1+(lambd_vox-self.lambd[n_vox])**2.)
+            log_l += self.beta*betafunc
+        return -log_l

@@ -14,8 +14,7 @@ import logging.config
 #import warnings
 #import sys
 import map_reliability_support.set_up_replications as setrep
-#import map_reliability.map_reliability_support.likelihood_calc as likelihood
-#import map_reliability.map_reliability_support.create_reliability_map as rmap
+import map_reliability_support.likelihood_calc as likelihood
 
 
 logger = logging.getLogger(__name__)

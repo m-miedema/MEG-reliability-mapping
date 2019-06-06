@@ -6,10 +6,12 @@ Created on Mon Jan 21 22:43:43 2019
 """
 
 from scipy import spatial
+from random import randint
 import os
 import mne
 import pandas as pd
 import numpy as np
+import nibabel as nib
 import logging.config
 import warnings
 
@@ -71,3 +73,88 @@ def get_nn_src(srcFile, nnFile, neighbourhood, radius):
             nn_dfs.append(pt_df)
         nn_df = pd.concat(nn_dfs)
         nn_df.to_csv(nnFile)
+        
+def sim_replications(cfg):
+        base_subject = cfg["simTestData"]["base_subject"]
+        print(base_subject)
+        base_mode = cfg["simTestData"]["base_mode"]
+        sim_subject = cfg["simTestData"]["sim_subject"]
+        sim_mode = cfg["simTestData"]["sim_mode"]
+        relDir = cfg["file_io"]["dirs"]["relDir"]
+        replicDir = os.path.join(relDir, base_subject[0], base_mode[0])
+        simDir = os.path.join(relDir, sim_subject[0], sim_mode[0])
+        num_replic = cfg["reliability_mapping"]["data_division"]["num_replications"]
+        
+        
+        
+        # first read in the orignial replications
+        
+        for split_num in range(1,num_replic+1):
+            # load ERB data for each 'replication'
+            replicFile = os.path.join(replicDir, "".join(['replication_', 
+                                str(split_num), '_', cfg["file_io"]["file_ext"]["nifti_file"]]))
+            replic_obj = nib.load(replicFile)
+            replic_data = replic_obj.get_fdata()#[:,:,:,self.timept]
+            sim_data = []
+            for ts in range(0,replic_data.shape[3]):
+                # generate noise
+                base_dist = replic_data[:,:,:,ts]
+                stdev = np.std(base_dist)
+                mean = np.mean(base_dist)
+                noise_dist = np.abs(np.random.normal(loc=mean,scale=stdev,size=replic_data.shape[0:-1]))
+                # add a source
+                amp = np.amax(base_dist)
+                pos = [8+randint(-2,3), 16+randint(-4,4), 22 + randint(-5, 5)]
+                stdev = 5
+                source_dist = Gaussian_amp(0.5*noise_dist, amp, pos, stdev) 
+                # set voxels outside the head to zero
+                active = np.where(base_dist.flatten()>0., 1., 0.)
+                sim_data_ts = np.multiply(source_dist,np.reshape(active,source_dist.shape))
+                sim_data.append(sim_data_ts)
+            sim_data = np.stack(sim_data,axis=3)
+            sim_nii_data = nib.Nifti1Image(sim_data,None,header=replic_obj.header.copy())
+            nib.save(sim_nii_data,os.path.join(simDir,"".join(['replication_', 
+                                str(split_num), '_', cfg["file_io"]["file_ext"]["nifti_file"]])))
+
+
+	#also save "full" ERB file
+	for i in range(0,1):
+            # load ERB data for each 'replication'
+            replicFile = os.path.join(replicDir, "".join(['full', cfg["file_io"]["file_ext"]["nifti_file"]]))
+            replic_obj = nib.load(replicFile)
+            replic_data = replic_obj.get_fdata()#[:,:,:,self.timept]
+            sim_data = []
+            for ts in range(0,replic_data.shape[3]):
+                # generate noise
+                base_dist = replic_data[:,:,:,ts]
+                stdev = np.std(base_dist)
+                mean = np.mean(base_dist)
+                noise_dist = np.abs(np.random.normal(loc=mean,scale=stdev,size=replic_data.shape[0:-1]))
+                # add a source
+                amp = np.amax(base_dist)
+                pos = [8+randint(-2,3), 16+randint(-4,4), 22 + randint(-5, 5)]
+                stdev = 5
+                source_dist = Gaussian_amp(0.5*noise_dist, amp, pos, stdev) 
+                # set voxels outside the head to zero
+                active = np.where(base_dist.flatten()>0., 1., 0.)
+                sim_data_ts = np.multiply(source_dist,np.reshape(active,source_dist.shape))
+                sim_data.append(sim_data_ts)
+            sim_data = np.stack(sim_data,axis=3)
+            sim_nii_data = nib.Nifti1Image(sim_data,None,header=replic_obj.header.copy())
+            nib.save(sim_nii_data,os.path.join(simDir,"".join(['full', cfg["file_io"]["file_ext"]["nifti_file"]])))
+
+
+    
+        
+def Gaussian_amp(array, amp, pos, stdev):
+    # Generates a Gaussian point source in a 3D array based on specified parameters
+    
+    for x in range(0, array.shape[0]):
+        for y in range(0, array.shape[1]):
+            for z in range(0, array.shape[2]):
+                array[x,y,z] = array[x,y,z] + amp*np.exp(0.5*(-(x-pos[0])**2. - (y-pos[1])**2. - (z-pos[2])**2.)/stdev**2.)
+                
+    return array
+    
+    
+    

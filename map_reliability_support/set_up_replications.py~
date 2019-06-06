@@ -46,6 +46,7 @@ def set_up(cfg):
     bfActiveMin = cfg["data_processing"]["LCMV"]["bfActiveMin"]
     bfActiveMax = cfg["data_processing"]["LCMV"]["bfActiveMax"]
     regularization = cfg["data_processing"]["LCMV"]["regularization"]
+    spacing = cfg["data_processing"]["LCMV"]["spacing"]
     
     for subject_id in cfg["studySettings"]["subjects"]:   
         # subject-specific data:
@@ -62,7 +63,7 @@ def set_up(cfg):
             # split epochs file into a number of epochs files (ie. replications) & save an ERB map for each
             
             epochFile = os.path.join(simDir, 'sim_data', subject_id, sim_mode,
-                                     "".join([subject_id, cfg["file_io"]["file_ext"]["sim_epoch_fif"]]))
+                                     cfg["file_io"]["file_ext"]["sim_epoch_fif"])
             
             repDir = os.path.join(relDir, subject_id, sim_mode)
             if not os.path.exists(repDir):
@@ -122,4 +123,26 @@ def set_up(cfg):
                 mne.save_stc_as_volume(niiFile, stc, forward['src'], dest='surf',
                                                              mri_resolution=False)
                 
-                split_num = split_num + 1              
+                split_num = split_num + 1    
+          
+            # also create an ERB map for the entire dataset
+            evoked = epochs.average()
+            evoked.apply_baseline((baseStart, baseEnd))
+            # calculate covariance
+            noise_cov = mne.compute_covariance(epochs, 
+                                tmin=bfBaselineMin, tmax=bfBaselineMax, n_jobs = 4)
+            data_cov = mne.compute_covariance(epochs, 
+                                tmin=bfActiveMin, tmax=bfActiveMax, n_jobs = 4)
+            # run LCMV beamformer
+            filters = mne.beamformer.make_lcmv(epochs.info, forward, data_cov, 
+                            reg=regularization, noise_cov=noise_cov, pick_ori='max-power')
+            stc = mne.beamformer.apply_lcmv(evoked, filters)
+            # crop beamformer result to times of interest
+            stc.crop(bfActiveMin, bfActiveMax)
+            # take absolute value of beamformer (to eliminate anti-phase issue)
+            np.abs(stc.data, out=stc.data)
+                
+            # save ERB map
+            niiFile = os.path.join(repDir, "".join(['full', cfg["file_io"]["file_ext"]["nifti_file"]]))
+            mne.save_stc_as_volume(niiFile, stc, forward['src'], dest='surf',
+                                                             mri_resolution=False)

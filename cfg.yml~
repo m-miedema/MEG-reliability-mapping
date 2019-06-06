@@ -2,7 +2,7 @@ file_io:
     dirs:
         studyDir: /biotic/home/marym/data/thesis
         subjectsDir: /biotic/home/marym/data/thesis/subjects
-        simDir: /biotic/home/marym/data/thesis/sim_data/sim_data
+        simDir: /biotic/home/marym/data/thesis/sim_data
         relDir: /biotic/home/marym/data/thesis/reliability-maps
     file_ext:
         src_fif: -vol-5-src.fif
@@ -19,17 +19,24 @@ reliability_mapping:
     nn:
         neighbourhood: 2
         radius: 0.005 # only used if neighbourhood = False
-    likelihood:
-        init_beta: 0.3
-        max_iterations: 400
-        conv_tolerance: 0.001
+    ML:
+        num_thresholds: 10 
+        init_beta: 2.3454
+        max_iterations: 5
+        conv_tolerance: 0.005
     files:
         MASK: None
+    map_times:
+        - 20
+    map_thresholds:
+        - 0.8
+        - 0.5
 data_processing:
     baseline:
         baseStart: -0.02
         baseEnd: 0.
     LCMV:
+#        spacing: 8 # mm
         bfBaselineMin: -0.5 # this is different
         bfBaselineMax: 0.0
         bfActiveMin: 0.0
@@ -38,8 +45,8 @@ data_processing:
 studySettings:
     subjects:
         - sub01
-        - sub02
-        - sub03
+#        - sub02
+#        - sub03
     sim_modes:
-        - one_fixed
-#        - one_jitter 
+#        - one_fixed
+        - one_jitter 
